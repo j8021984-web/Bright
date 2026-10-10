@@ -1,6 +1,6 @@
 (()=>{'use strict';
 const $=id=>document.getElementById(id), cfg=window.BEAUTY_CONFIG||{}, $all=s=>Array.from(document.querySelectorAll(s));
-const state={db:null,admin:false,mode:'customer',tab:'requests',services:[],staff:[],bookings:[],selected:new Date(),calMode:'month',edit:null};
+const state={db:null,admin:false,mode:'customer',tab:'requests',services:[],staff:[],bookings:[],selected:new Date(),calMode:'month',edit:null,line:{inClient:false,ready:false,idToken:null,displayName:null}};
 const pad=n=>String(n).padStart(2,'0'),dateKey=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`,atLocal=iso=>new Date(iso).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}),dayLocal=iso=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(iso)),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function msg(s,error=false){$('notice').textContent=s;$('notice').classList.toggle('error',error);$('notice').classList.remove('hidden');window.scrollTo({top:0,behavior:'smooth'});}
 function clearMsg(){$('notice').classList.add('hidden');}
@@ -12,7 +12,35 @@ async function loadPublic(){state.services=await call(state.db.from('services').
 function bookingDate(){return $('bookDate').value;}
 async function loadTimes(){const s=state.services.find(x=>x.id===$('bookService').value),day=bookingDate(),select=$('bookTime');select.innerHTML='<option value="">請先選擇服務與日期</option>';$('serviceInfo').textContent=s?`預估 ${s.duration_minutes} 分鐘｜NT$ ${Number(s.price).toLocaleString()}`:'';if(!s||!day)return;
 try{const busy=await call(state.db.rpc('get_busy_slots',{p_day:day}));const slots=[];for(let h=9;h<=19;h++)for(const m of [0,30]){const start=new Date(`${day}T${pad(h)}:${pad(m)}:00+08:00`),end=new Date(start.getTime()+s.duration_minutes*60000);if(start.getTime()<Date.now()+3600000||end.getTime()>new Date(`${day}T20:00:00+08:00`).getTime())continue;if(busy.some(b=>start<new Date(b.end_at)&&end>new Date(b.start_at)))continue;slots.push(`${pad(h)}:${pad(m)}`);}select.innerHTML='<option value="">請選擇可預約時間</option>'+slots.map(t=>`<option value="${t}">${t}</option>`).join('');if(!slots.length)select.innerHTML='<option value="">當日無可預約時段</option>';}catch(e){fail(e);}}
-async function submitBooking(e){e.preventDefault();const s=$('bookService').value,day=bookingDate(),t=$('bookTime').value;if(!s||!day||!t)return msg('請選擇服務、日期及時間',true);try{const id=await call(state.db.rpc('request_booking',{p_service_id:s,p_name:$('bookName').value.trim(),p_phone:$('bookPhone').value.trim(),p_note:$('bookNote').value.trim(),p_start:new Date(`${day}T${t}:00+08:00`).toISOString()}));$('bookingForm').reset();$('bookDate').value=dateKey(new Date());await loadTimes();msg(`申請已送出！請等待店家審核。申請編號：${id.slice(0,8)}（請自行保存）`);}catch(e){fail(e);}}
+async function initLine(){
+ const el=$('lineIdentity');if(!el)return;
+ if(!cfg.liffId||!window.liff){el.textContent='一般網頁預約：請填寫姓名與電話。LINE 身分尚未啟用。';return;}
+ try{
+  await window.liff.init({liffId:cfg.liffId});
+  state.line.inClient=window.liff.isInClient();
+  if(!window.liff.isLoggedIn()){
+   el.textContent='請使用 LINE 登入後再預約。';
+   if(state.line.inClient){window.liff.login();return;}
+   // 一般瀏覽器不強制跳轉，保留原有公開預約功能。
+   el.textContent='一般網頁預約：可填寫姓名與電話；若要綁定 LINE，請從 LIFF 網址開啟。';return;
+  }
+  state.line.idToken=window.liff.getIDToken();
+  if(!state.line.idToken)throw Error('LINE 未提供身分憑證');
+  state.line.ready=true;
+  const profile=await window.liff.getProfile();state.line.displayName=profile.displayName;
+  el.textContent='已透過 LINE 登入：'+profile.displayName+'（預約仍需填寫姓名及電話）';
+ }catch(err){console.error('LIFF:',err);el.textContent='LINE 身分驗證尚未完成，請重新從 LIFF 網址開啟。';state.line.ready=false;state.line.idToken=null;}
+}
+async function submitLineBooking(payload){
+ const response=await fetch(cfg.supabaseUrl+'/functions/v1/line-booking',{
+  method:'POST',headers:{'Content-Type':'application/json','apikey':cfg.supabaseAnonKey},
+  body:JSON.stringify({...payload,id_token:state.line.idToken})
+ });
+ const result=await response.json().catch(()=>({}));
+ if(!response.ok)throw Error(result.error||'LINE 預約送出失敗');
+ return result.booking_id;
+}
+async function submitBooking(e){e.preventDefault();const s=$('bookService').value,day=bookingDate(),t=$('bookTime').value;if(!s||!day||!t)return msg('請選擇服務、日期及時間',true);try{const payload={p_service_id:s,p_name:$('bookName').value.trim(),p_phone:$('bookPhone').value.trim(),p_note:$('bookNote').value.trim(),p_start:new Date(`${day}T${t}:00+08:00`).toISOString()};if(state.line.inClient&&!state.line.ready)throw Error('LINE 身分尚未驗證，請重新開啟 LIFF 預約網址');const id=state.line.ready?await submitLineBooking(payload):await call(state.db.rpc('request_booking',payload));$('bookingForm').reset();$('bookDate').value=dateKey(new Date());await loadTimes();msg(`申請已送出！請等待店家審核。申請編號：${id.slice(0,8)}（請自行保存）`);}catch(e){fail(e);}}
 async function syncAuth(){if(!state.db)return;try{const {data:{user}}=await state.db.auth.getUser();state.admin=user?await call(state.db.rpc('is_studio_admin')):false;$('loginPanel').classList.toggle('hidden',state.admin);$('dashboard').classList.toggle('hidden',!state.admin);if(state.admin)await loadAdmin();else if(user)msg('帳號已登入，但尚未被授權為工作室管理員。請依 README 設定 admin_users。',true);}catch(e){fail(e);}}
 async function login(e) {
   e.preventDefault();
@@ -67,5 +95,5 @@ await call(id?state.db.from(table).update(payload).eq('id',id):state.db.from(tab
 async function deleteEdit(){const {kind,id}=state.edit;if(!id||!confirm('確定永久刪除此項目？'))return;try{await call(state.db.from(kind==='service'?'services':'staff').delete().eq('id',id));$('editDialog').close();await loadAdmin();msg('已刪除');}catch(e){fail(e);}}
 async function cancelBooking(id){if(!confirm('確定取消此預約？'))return;try{await call(state.db.from('bookings').update({status:'cancelled'}).eq('id',id));await loadAdmin();msg('預約已取消');}catch(e){fail(e);}}
 function bind(){ $('switchMode').onclick=()=>switchMode(state.mode==='customer'?'admin':'customer');$('bookService').onchange=loadTimes;$('bookDate').onchange=loadTimes;$('bookingForm').onsubmit=submitBooking;$('loginForm').onsubmit=login;$('logoutBtn').onclick=async()=>{await state.db.auth.signOut();state.admin=false;await syncAuth();};$all('#adminTabs button').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));$('prevPeriod').onclick=()=>moveDate(-1);$('nextPeriod').onclick=()=>moveDate(1);$('todayBtn').onclick=()=>{state.selected=new Date();renderCalendar();};$('calendarMode').onchange=e=>{state.calMode=e.target.value;renderCalendar();};$('addBooking').onclick=()=>openEdit('booking');$('addService').onclick=()=>openEdit('service');$('addStaff').onclick=()=>openEdit('staff');$('editForm').onsubmit=saveEdit;$('deleteEdit').onclick=deleteEdit;$('closeDialog').onclick=()=>$('editDialog').close();$('copyUrl').onclick=async()=>{try{await navigator.clipboard.writeText(location.href.split('#')[0].split('?')[0]);msg('已複製預約網址');}catch{msg('請手動複製網址列',true);}};document.addEventListener('click',e=>{const date=e.target.closest('[data-date]');if(date){state.selected=new Date(date.dataset.date+'T12:00:00');renderCalendar();return;}const b=e.target.closest('[data-action]');if(!b)return;const {action,id}=b.dataset;if(action==='approve')review(id,'approved');if(action==='reject')review(id,'rejected');if(action==='cancel')cancelBooking(id);if(action==='editService')openEdit('service',id);if(action==='editStaff')openEdit('staff',id);if(action==='editBooking')openEdit('booking',id);});}
-async function init(){bind();$('studioName').textContent=cfg.studioName||'美業預約管家';$('publicUrl').textContent=location.href.split('?')[0].split('#')[0];if(cfg.lineOfficialUrl){$('lineLink').href=cfg.lineOfficialUrl;$('lineLink').classList.remove('hidden');}const now=new Date();$('bookDate').min=dateKey(now);const max=new Date(now);max.setDate(max.getDate()+90);$('bookDate').max=dateKey(max);$('bookDate').value=dateKey(now);if(!cfg.supabaseUrl||!cfg.supabaseAnonKey){msg('尚未設定 Supabase。請依 README 設定 config.js 後重新部署，才能使用真實預約。',true);$('bookingForm').querySelector('button[type=submit]').disabled=true;return;}if(!window.supabase){msg('Supabase 套件載入失敗，請檢查網路連線。',true);return;}state.db=window.supabase.createClient(cfg.supabaseUrl,cfg.supabaseAnonKey);try{await loadPublic();}catch(e){fail(e);}if(new URLSearchParams(location.search).get('admin')==='1')switchMode('admin');}
+async function init(){bind();$('studioName').textContent=cfg.studioName||'美業預約管家';$('publicUrl').textContent=location.href.split('?')[0].split('#')[0];if(cfg.lineOfficialUrl){$('lineLink').href=cfg.lineOfficialUrl;$('lineLink').classList.remove('hidden');}const now=new Date();$('bookDate').min=dateKey(now);const max=new Date(now);max.setDate(max.getDate()+90);$('bookDate').max=dateKey(max);$('bookDate').value=dateKey(now);if(!cfg.supabaseUrl||!cfg.supabaseAnonKey){msg('尚未設定 Supabase。請依 README 設定 config.js 後重新部署，才能使用真實預約。',true);$('bookingForm').querySelector('button[type=submit]').disabled=true;return;}if(!window.supabase){msg('Supabase 套件載入失敗，請檢查網路連線。',true);return;}state.db=window.supabase.createClient(cfg.supabaseUrl,cfg.supabaseAnonKey);try{await loadPublic();}catch(e){fail(e);}await initLine();if(new URLSearchParams(location.search).get('admin')==='1')switchMode('admin');}
 init();})();
