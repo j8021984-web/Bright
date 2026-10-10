@@ -14,7 +14,37 @@ async function loadTimes(){const s=state.services.find(x=>x.id===$('bookService'
 try{const busy=await call(state.db.rpc('get_busy_slots',{p_day:day}));const slots=[];for(let h=9;h<=19;h++)for(const m of [0,30]){const start=new Date(`${day}T${pad(h)}:${pad(m)}:00+08:00`),end=new Date(start.getTime()+s.duration_minutes*60000);if(start.getTime()<Date.now()+3600000||end.getTime()>new Date(`${day}T20:00:00+08:00`).getTime())continue;if(busy.some(b=>start<new Date(b.end_at)&&end>new Date(b.start_at)))continue;slots.push(`${pad(h)}:${pad(m)}`);}select.innerHTML='<option value="">請選擇可預約時間</option>'+slots.map(t=>`<option value="${t}">${t}</option>`).join('');if(!slots.length)select.innerHTML='<option value="">當日無可預約時段</option>';}catch(e){fail(e);}}
 async function submitBooking(e){e.preventDefault();const s=$('bookService').value,day=bookingDate(),t=$('bookTime').value;if(!s||!day||!t)return msg('請選擇服務、日期及時間',true);try{const id=await call(state.db.rpc('request_booking',{p_service_id:s,p_name:$('bookName').value.trim(),p_phone:$('bookPhone').value.trim(),p_note:$('bookNote').value.trim(),p_start:new Date(`${day}T${t}:00+08:00`).toISOString()}));$('bookingForm').reset();$('bookDate').value=dateKey(new Date());await loadTimes();msg(`申請已送出！請等待店家審核。申請編號：${id.slice(0,8)}（請自行保存）`);}catch(e){fail(e);}}
 async function syncAuth(){if(!state.db)return;try{const {data:{user}}=await state.db.auth.getUser();state.admin=user?await call(state.db.rpc('is_studio_admin')):false;$('loginPanel').classList.toggle('hidden',state.admin);$('dashboard').classList.toggle('hidden',!state.admin);if(state.admin)await loadAdmin();else if(user)msg('帳號已登入，但尚未被授權為工作室管理員。請依 README 設定 admin_users。',true);}catch(e){fail(e);}}
-async function login(e){e.preventDefault();try{await call(state.db.auth.signInWithPassword({email:$('loginEmail').value,password:$('loginPassword').value}));await syncAuth();}catch(e){fail(e);}}
+async function login(e) {
+  e.preventDefault();
+
+  try {
+    if (!state.db || !state.db.auth) {
+      throw new Error(
+        'Supabase 尚未初始化，請重新整理頁面後再試'
+      );
+    }
+
+    const email = $('loginEmail').value.trim();
+    const password = $('loginPassword').value;
+
+    const { data, error } =
+      await state.db.auth.signInWithPassword({
+        email,
+        password
+      });
+
+    if (error) throw error;
+
+    if (!data.user) {
+      throw new Error('登入失敗，請重新嘗試');
+    }
+
+    await syncAuth();
+
+  } catch (error) {
+    fail(error);
+  }
+}
 async function loadAdmin(){if(!state.admin)return;try{const [services,staff,bookings]=await Promise.all([call(state.db.from('services').select('*').order('category').order('name')),call(state.db.from('staff').select('*').order('name')),call(state.db.from('bookings').select('*').order('start_at',{ascending:true}))]);Object.assign(state,{services,staff,bookings});renderAll();}catch(e){fail(e);}}
 function renderAll(){renderRequests();renderCalendar();renderServices();renderStaff();renderCustomers();}
 function showTab(tab){state.tab=tab;$all('#adminTabs button').forEach(b=>b.classList.toggle('selected',b.dataset.tab===tab));$all('.tab').forEach(p=>p.classList.toggle('hidden',p.id!==tab+'Tab'));if(tab==='calendar')renderCalendar();}
